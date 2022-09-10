@@ -4,7 +4,11 @@ use femtovg::{renderer::OpenGl, Canvas, Color, Paint, Path};
 use glutin::{event_loop::{EventLoop, ControlFlow}, window::{WindowBuilder, Window}, ContextBuilder, ContextWrapper, PossiblyCurrent, event::{Event, WindowEvent}};
 
 fn main() {
-    init_and_run();
+    println!("Would you like to limit fps? y/n");
+    let mut buffer = String::new();
+    std::io::stdin().read_line(&mut buffer).unwrap();
+
+    init_and_run(buffer.contains('y'));
 }
 
 // How many past polls to display
@@ -31,9 +35,11 @@ const ACTIONS: [DisplayableAction; NUM_ACTIONS] = [
 ];
 
 struct GlobalState {
-    dt: f64,
+    limit_fps: bool,
     device_state: DeviceState,
     last_poll_attempt: Instant,
+    attempts_since_last_poll: usize,
+    last_fps: f64,
     poll_queue: VecDeque<RecordedPoll>,
     windowed_context: ContextWrapper<PossiblyCurrent, Window>,
     canvas: Canvas<OpenGl>,
@@ -49,7 +55,7 @@ struct RecordedPoll {
     keys: [bool; NUM_ACTIONS],
 }
 
-pub fn init_and_run() {
+pub fn init_and_run(limit_fps: bool) {
     let event_loop = EventLoop::new();
     let windowed_context = create_windowed_context(&event_loop);
     let canvas = create_canvas(&windowed_context);
@@ -59,9 +65,11 @@ pub fn init_and_run() {
     let poll_queue = VecDeque::with_capacity(MAX_QUEUE_SIZE);
 
     let mut state = GlobalState {
-        dt: 1.0,
+        limit_fps,
         device_state,
         last_poll_attempt: Instant::now(),
+        attempts_since_last_poll: 0,
+        last_fps: 0.0,
         poll_queue,
         windowed_context,
         canvas,
@@ -95,10 +103,15 @@ fn maybe_poll(state: &mut GlobalState) {
     let now = Instant::now();
     let dt = now.duration_since(state.last_poll_attempt);
     
-    // Don't hog the CPU too badly
-    let enough_time_passed = NANOS_PER_FRAME <= dt.as_nanos().checked_mul(MAX_POLLS_PER_FRAME).unwrap();
+    // Limit polling rate if needed
+    let enough_time_passed = if state.limit_fps {
+        NANOS_PER_FRAME <= dt.as_nanos().checked_mul(MAX_POLLS_PER_FRAME).unwrap()
+    } else {
+        true
+    };
+
     if enough_time_passed {
-        state.dt = dt.as_secs_f64();
+        state.attempts_since_last_poll += 1;
 
         poll(&now, state);
 
@@ -112,6 +125,14 @@ fn poll(now: &Instant, state: &mut GlobalState) {
 
     // Record poll if it's the first one, or if the pressed keys have changed
     if last_poll.is_none() || inputs_changed(&poll, last_poll.unwrap()) {
+        state.last_fps = if let Some(last_poll) = last_poll {
+            let dt = now.duration_since(last_poll.timestamp).as_secs_f64();
+            (state.attempts_since_last_poll as f64 / dt).round()
+        } else {
+            0.0
+        };
+        state.attempts_since_last_poll = 0;
+
         if state.poll_queue.len() >= MAX_QUEUE_SIZE {
             state.poll_queue.pop_back();
         }
@@ -159,7 +180,7 @@ fn render(state: &mut GlobalState) {
 
     state.canvas.clear_rect(0, 0, state.canvas.width() as u32, state.canvas.height() as u32, bg_color);
 
-    draw_fps_counter(&mut state.canvas, &state.dt, active_paint);
+    draw_fps_counter(&mut state.canvas, &state.last_fps, active_paint);
     draw_current_inputs(&mut state.canvas, state.poll_queue.front(), active_paint, inactive_paint);
     draw_past_inputs(&mut state.canvas, &state.poll_queue, active_paint);
 
@@ -167,11 +188,11 @@ fn render(state: &mut GlobalState) {
     state.windowed_context.swap_buffers().unwrap();
 }
 
-fn draw_fps_counter(canvas: &mut Canvas<OpenGl>, dt: &f64, paint: Paint) {
+fn draw_fps_counter(canvas: &mut Canvas<OpenGl>, fps: &f64, paint: Paint) {
     let _ = canvas.fill_text(
         10.0, 
         23.0,
-        format!("{: >4} fps", dt.recip().round()),
+        format!("{: >4} fps", fps),
         paint,
     );
 }
