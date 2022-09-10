@@ -16,7 +16,7 @@ const MAX_QUEUE_SIZE: usize = 30;
 // 1 frame in VVVVVV is 34ms, you will want to adapt this for other games
 const NANOS_PER_FRAME: u128 = 34000000;
 // How many polls should happen per in-game frame
-// Increasing this will make the program more CPU intensive
+// Increasing this will make the program more CPU intensive (when limiting fps)
 const MAX_POLLS_PER_FRAME: u128 = 10;
 
 // Window dimensions
@@ -36,11 +36,13 @@ const ACTIONS: [DisplayableAction; NUM_ACTIONS] = [
 
 struct GlobalState {
     limit_fps: bool,
-    device_state: DeviceState,
+    last_fps: f64,
+
     last_poll_attempt: Instant,
     attempts_since_last_poll: usize,
-    last_fps: f64,
     poll_queue: VecDeque<RecordedPoll>,
+
+    device_state: DeviceState,
     windowed_context: ContextWrapper<PossiblyCurrent, Window>,
     canvas: Canvas<OpenGl>,
 }
@@ -59,18 +61,19 @@ pub fn init_and_run(limit_fps: bool) {
     let event_loop = EventLoop::new();
     let windowed_context = create_windowed_context(&event_loop);
     let canvas = create_canvas(&windowed_context);
-
     let device_state = DeviceState::new();
 
     let poll_queue = VecDeque::with_capacity(MAX_QUEUE_SIZE);
 
     let mut state = GlobalState {
         limit_fps,
-        device_state,
+        last_fps: 0.0,
+
         last_poll_attempt: Instant::now(),
         attempts_since_last_poll: 0,
-        last_fps: 0.0,
         poll_queue,
+
+        device_state,
         windowed_context,
         canvas,
     };
@@ -125,21 +128,25 @@ fn poll(now: &Instant, state: &mut GlobalState) {
 
     // Record poll if it's the first one, or if the pressed keys have changed
     if last_poll.is_none() || inputs_changed(&poll, last_poll.unwrap()) {
-        state.last_fps = if let Some(last_poll) = last_poll {
-            let dt = now.duration_since(last_poll.timestamp).as_secs_f64();
-            (state.attempts_since_last_poll as f64 / dt).round()
-        } else {
-            0.0
-        };
-        state.attempts_since_last_poll = 0;
-
-        if state.poll_queue.len() >= MAX_QUEUE_SIZE {
-            state.poll_queue.pop_back();
-        }
-        state.poll_queue.push_front(poll);
+        record_poll(&now, poll, state);
         
         state.windowed_context.window().request_redraw();
     }
+}
+
+fn record_poll(now: &Instant, poll: RecordedPoll, state: &mut GlobalState) {
+    state.last_fps = if let Some(last_poll) = state.poll_queue.front() {
+        let dt = now.duration_since(last_poll.timestamp).as_secs_f64();
+        (state.attempts_since_last_poll as f64 / dt).round()
+    } else {
+        0.0
+    };
+    state.attempts_since_last_poll = 0;
+
+    if state.poll_queue.len() >= MAX_QUEUE_SIZE {
+        state.poll_queue.pop_back();
+    }
+    state.poll_queue.push_front(poll);
 }
 
 fn get_pressed_keys(now: &Instant, device_state: &DeviceState) -> RecordedPoll {
@@ -159,13 +166,7 @@ fn get_pressed_keys(now: &Instant, device_state: &DeviceState) -> RecordedPoll {
 }
 
 fn inputs_changed(this_poll: &RecordedPoll, last_poll: &RecordedPoll) -> bool {
-    for i in 0..NUM_ACTIONS {
-        if last_poll.keys[i] != this_poll.keys[i] {
-            return true;
-        }
-    }
-
-    false
+    this_poll.keys.ne(&last_poll.keys)
 }
 
 fn render(state: &mut GlobalState) {
